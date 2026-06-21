@@ -114,8 +114,22 @@ impl SubSceneConfig for RagdollPreviewConfig {
     }
 
     fn update(&self, id: egui::Id, world: &mut World) {
+        // This runs every egui frame (i.e. at render rate), but the queued
+        // commands are only consumed at the fixed timestep. Clear first so we
+        // keep just the latest set instead of accumulating one copy per frame
+        // between ticks.
+        clear_overlay_queues(id, world);
         for overlay in &self.gizmo_overlays {
             draw_gizmo_overlay(id, overlay, world);
+        }
+    }
+}
+
+fn clear_overlay_queues(id: egui::Id, world: &mut World) {
+    let mut query = world.query::<(&mut AnimationGraphPlayer, &PartOfSubScene)>();
+    for (mut player, PartOfSubScene(target_id)) in query.iter_mut(world) {
+        if id == *target_id {
+            player.clear_debug_draw_queues();
         }
     }
 }

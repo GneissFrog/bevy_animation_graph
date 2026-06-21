@@ -159,11 +159,16 @@ pub fn animation_player(
 /// System that will draw deferred gizmo commands called during graph evaluation
 #[allow(clippy::too_many_arguments)]
 pub fn animation_player_deferred_gizmos(
-    mut animation_players: Query<&mut AnimationGraphPlayer>,
+    animation_players: Query<&AnimationGraphPlayer>,
     mut gizmos: Gizmos,
 ) {
-    for mut player in &mut animation_players {
-        player.deferred_gizmos.apply(&mut gizmos);
+    for player in &animation_players {
+        // Re-apply without draining: this runs every rendered frame, while the
+        // buffer is only regenerated at the fixed timestep. Draining here would
+        // blank the gizmos on frames between fixed ticks, causing flicker when
+        // the render rate exceeds the fixed rate (e.g. an uncapped, focused
+        // editor window).
+        player.deferred_gizmos.apply_persistent(&mut gizmos);
     }
 }
 
@@ -175,6 +180,12 @@ pub fn run_animation_player(
     system_resources: &SystemResources,
 ) {
     let _run_animation_player_span = info_span!("run_animation_player").entered();
+
+    // Start a fresh deferred gizmo buffer for this tick. The buffer is now
+    // re-applied every render frame (see `animation_player_deferred_gizmos`)
+    // rather than drained on apply, so it must be cleared here before the graph
+    // evaluation and bone/custom passes repopulate it.
+    player.clear_deferred_gizmos();
 
     // The entity map is updated regardless of animation type.
     // Important as the entity map is relied upon for e.g. debug bone drawing

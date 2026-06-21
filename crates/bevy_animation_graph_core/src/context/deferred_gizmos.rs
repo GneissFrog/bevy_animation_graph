@@ -59,6 +59,29 @@ impl DeferredGizmos {
         }
     }
 
+    /// Apply all queued commands without consuming them, so the same set can be
+    /// re-emitted on subsequent frames.
+    ///
+    /// Gizmos are immediate-mode and their buffer is cleared every rendered
+    /// frame, but these commands are typically (re)generated at the fixed
+    /// timestep rate. Draining on apply would leave nothing to draw on frames
+    /// that don't coincide with a fixed tick, causing flicker when the render
+    /// rate exceeds the fixed rate. Re-applying the retained buffer every frame
+    /// keeps the gizmos stable; [`Self::clear`] is called once per tick before
+    /// regenerating them.
+    pub fn apply_persistent(&self, gizmos: &mut Gizmos) {
+        for command in &self.commands {
+            command.clone().apply(gizmos);
+        }
+    }
+
+    /// Drops all queued commands. Called once per generation cycle (fixed tick)
+    /// before the buffer is repopulated, since [`Self::apply_persistent`] no
+    /// longer drains it.
+    pub fn clear(&mut self) {
+        self.commands.clear();
+    }
+
     pub fn queue(&mut self, command: DeferredGizmoCommand) {
         self.commands.push(command);
     }

@@ -248,6 +248,22 @@ impl AnimationGraphPlayer {
         self.debug_draw_custom.push(gizmo);
     }
 
+    /// Clears the queued bone/custom gizmo requests without consuming them into
+    /// the deferred buffer. Used by frame-rate producers (e.g. the editor
+    /// preview overlays) that re-submit the full set every frame, to avoid
+    /// accumulating duplicate copies between fixed ticks.
+    pub fn clear_debug_draw_queues(&mut self) {
+        self.debug_draw_bones.clear();
+        self.debug_draw_custom.clear();
+    }
+
+    /// Drops the retained deferred gizmo buffer. Called once per fixed tick
+    /// before regenerating gizmos, since they are now re-applied every render
+    /// frame rather than drained on apply.
+    pub(crate) fn clear_deferred_gizmos(&mut self) {
+        self.deferred_gizmos.clear();
+    }
+
     pub fn gizmo_relative_to_root(
         &mut self,
         f: impl Fn(Transform, &mut Gizmos) + Send + Sync + 'static,
