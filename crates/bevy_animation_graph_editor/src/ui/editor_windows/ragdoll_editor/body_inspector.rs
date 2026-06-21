@@ -28,6 +28,8 @@ impl Widget for BodyInspector<'_> {
                 .selected_text(match self.body.default_mode {
                     BodyMode::Kinematic => "Kinematic",
                     BodyMode::Dynamic => "Dynamic",
+                    BodyMode::FollowAbsolute => "Follow (absolute)",
+                    BodyMode::FollowRelative => "Follow (relative)",
                 })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
@@ -36,6 +38,16 @@ impl Widget for BodyInspector<'_> {
                         "Kinematic",
                     );
                     ui.selectable_value(&mut self.body.default_mode, BodyMode::Dynamic, "Dynamic");
+                    ui.selectable_value(
+                        &mut self.body.default_mode,
+                        BodyMode::FollowAbsolute,
+                        "Follow (absolute)",
+                    );
+                    ui.selectable_value(
+                        &mut self.body.default_mode,
+                        BodyMode::FollowRelative,
+                        "Follow (relative)",
+                    );
                 })
                 .response;
             ui.end_row();

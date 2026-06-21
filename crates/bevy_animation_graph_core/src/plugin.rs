@@ -1,5 +1,8 @@
 #[cfg(feature = "physics_avian")]
-use avian3d::prelude::PhysicsSystems;
+use avian3d::{
+    dynamics::{integrator::IntegrationSystems, solver::schedule::SubstepSolverSystems},
+    prelude::{PhysicsSystems, SubstepSchedule},
+};
 use bevy::{
     app::{App, Plugin, PreUpdate},
     asset::AssetApp,
@@ -13,8 +16,9 @@ use bevy::{
 
 #[cfg(feature = "physics_avian")]
 use crate::physics_systems_avian::{
-    read_back_poses_avian, spawn_missing_ragdolls_avian, update_ragdoll_rigidbodies,
-    update_ragdolls_avian, update_relative_kinematic_body_velocities,
+    clamp_pose_following_body_velocity_avian, drive_pose_following_absolute_avian,
+    drive_pose_following_relative_avian, read_back_poses_avian, spawn_missing_ragdolls_avian,
+    update_ragdoll_rigidbodies, update_ragdolls_avian, update_relative_kinematic_body_velocities,
     update_relative_kinematic_position_based_body_velocities,
 };
 use crate::{
@@ -113,9 +117,25 @@ impl Plugin for AnimationGraphCorePlugin {
                 update_relative_kinematic_position_based_body_velocities,
                 #[cfg(feature = "physics_avian")]
                 update_relative_kinematic_body_velocities,
+                // Pose following: drive dynamic follow-bodies towards the animated target. Must run
+                // after `update_ragdolls_avian` has written each body's `relative_target`.
+                #[cfg(feature = "physics_avian")]
+                drive_pose_following_absolute_avian,
+                #[cfg(feature = "physics_avian")]
+                drive_pose_following_relative_avian,
             )
                 .chain()
                 .in_set(AnimationGraphSet::PrePhysics),
+        );
+
+        // Anti-launch net for pose-following bodies: clamp solver velocity between the constraint
+        // solve and position integration (avian's own `MaxLinearSpeed` clamp runs at substep start).
+        #[cfg(feature = "physics_avian")]
+        app.add_systems(
+            SubstepSchedule,
+            clamp_pose_following_body_velocity_avian
+                .after(SubstepSolverSystems::SolveConstraints)
+                .before(IntegrationSystems::Position),
         );
 
         #[cfg(feature = "physics_avian")]

@@ -28,3 +28,9 @@ bevy-inspector-egui = { version = "0.36" }
 ron = "0.10.1"
 serde = "1.0"
 rand = "0.10"
+
+[patch.crates-io]
+# This fork's relative pose-following needs the spherical-joint angular motor we added to avian
+# (upstream 0.6 ships motors for revolute/prismatic only). Point avian at our fork so the crate
+# builds standalone; downstream consumers (e.g. guidedog) apply the same patch.
+avian3d = { git = "https://github.com/GneissFrog/avian", branch = "feat/spherical-angular-motor" }

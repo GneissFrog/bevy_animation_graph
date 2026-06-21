@@ -53,10 +53,16 @@ pub fn spawn_ragdoll_avian(
     commands: &mut Commands,
 ) -> SpawnedRagdoll {
     use avian3d::prelude::{
-        AngleLimit, AngularMotor, CollisionLayers, MotorModel, RevoluteJoint, RigidBody,
+        AngleLimit, AngularMotor, CollisionLayers, ConstantAngularAcceleration,
+        ConstantLinearAcceleration, MaxLinearSpeed, MotorModel, RevoluteJoint, RigidBody,
         SphericalJoint,
     };
-    use bevy::{ecs::name::Name, math::Vec3, transform::components::Transform, utils::default};
+    use bevy::{
+        ecs::name::Name,
+        math::{Quat, Vec3},
+        transform::components::Transform,
+        utils::default,
+    };
 
     let root = commands
         .spawn((
@@ -89,8 +95,7 @@ pub fn spawn_ragdoll_avian(
 
     for body in ragdoll.bodies.values() {
         use crate::ragdoll::{
-            definition::{BodyLabel, BodyMode},
-            relative_kinematic_body::RelativeKinematicBodyPositionBased,
+            definition::BodyLabel, relative_kinematic_body::RelativeKinematicBodyPositionBased,
         };
 
         let body_entity = commands
@@ -100,15 +105,21 @@ pub fn spawn_ragdoll_avian(
                     translation: body.offset,
                     ..default()
                 },
-                match body.default_mode {
-                    BodyMode::Kinematic => RigidBody::Kinematic,
-                    BodyMode::Dynamic => RigidBody::Dynamic,
+                if body.default_mode.is_dynamic() {
+                    RigidBody::Dynamic
+                } else {
+                    RigidBody::Kinematic
                 },
                 RelativeKinematicBodyPositionBased {
                     relative_to: simulated_parent,
                     ..default()
                 },
                 BodyLabel(body.label.clone()),
+                // Force inputs for the absolute pose-following drive (zero unless driven), and the
+                // anti-launch cap. Harmless on kinematic / free-dynamic bodies.
+                ConstantAngularAcceleration::default(),
+                ConstantLinearAcceleration::default(),
+                MaxLinearSpeed(ragdoll.pose_following.max_body_speed),
             ))
             .id();
 
@@ -200,6 +211,10 @@ pub fn spawn_ragdoll_avian(
                             point_compliance: spherical_joint.point_compliance,
                             swing_compliance: spherical_joint.swing_compliance,
                             twist_compliance: spherical_joint.twist_compliance,
+                            // Motor starts disabled; the relative pose-following drive enables it and
+                            // sets `target_orientation` per frame for `FollowRelative` bodies.
+                            motor: AngularMotor::new_disabled(MotorModel::DEFAULT),
+                            target_orientation: Quat::IDENTITY,
                         },
                     ))
                     .id()

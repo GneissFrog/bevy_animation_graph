@@ -24,6 +24,10 @@ pub struct Ragdoll {
     /// colliders.
     #[serde(default)]
     pub total_mass: f32,
+
+    /// Tuning for the "pose following" [`BodyMode`]s.
+    #[serde(default)]
+    pub pose_following: PoseFollowing,
 }
 
 impl Default for Ragdoll {
@@ -35,6 +39,7 @@ impl Default for Ragdoll {
             suffixes: Default::default(),
 
             total_mass: 70.,
+            pose_following: Default::default(),
         }
     }
 }
@@ -186,9 +191,71 @@ impl Body {
 
 #[derive(Reflect, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum BodyMode {
+    /// The body is kinematically driven to exactly match the animated pose (via computed velocities).
     #[default]
     Kinematic,
+    /// The body is a free physics body (a classic ragdoll bone); its pose is read back from the sim.
     Dynamic,
+    /// "Pose following", absolute mode: a dynamic body pulled towards the animated target pose by a
+    /// world-space spring (PD). The body still collides and reacts to forces, but is biased towards
+    /// the animation. See [`Ragdoll::pose_following`].
+    FollowAbsolute,
+    /// "Pose following", relative mode: a dynamic body whose joint motor drives its rotation towards
+    /// the animated target *relative to its parent body*. Requires the body to be the child (`body2`)
+    /// of a [`SphericalJoint`]. See [`Ragdoll::pose_following`].
+    FollowRelative,
+}
+
+impl BodyMode {
+    /// Whether the body simulates as a dynamic rigid body (everything except [`Kinematic`](Self::Kinematic)).
+    pub fn is_dynamic(self) -> bool {
+        !matches!(self, BodyMode::Kinematic)
+    }
+
+    /// Whether the body is driven towards the animated pose by forces/motors (a "pose following" mode).
+    pub fn is_follow(self) -> bool {
+        matches!(self, BodyMode::FollowAbsolute | BodyMode::FollowRelative)
+    }
+}
+
+/// Tuning for the "pose following" [`BodyMode`]s (see [`BodyMode::FollowAbsolute`] /
+/// [`BodyMode::FollowRelative`]). Lives on the [`Ragdoll`] asset so it is authorable in the editor.
+///
+/// The angular drive uses an implicit spring-damper (matching avian's
+/// [`MotorModel::SpringDamper`](avian's joint motor model)); for `FollowRelative` it configures the
+/// spherical joint motor, for `FollowAbsolute` it is applied as a world-space angular spring.
+#[derive(Reflect, Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PoseFollowing {
+    /// Natural frequency (Hz) of the angular spring/motor. Higher = stiffer pose tracking.
+    pub frequency: f32,
+    /// Damping ratio of the angular spring/motor (1.0 = critically damped).
+    pub damping_ratio: f32,
+    /// Maximum torque the angular drive may apply (N·m). [`f32::MAX`] = unlimited.
+    pub max_torque: f32,
+    /// Natural frequency (Hz) of the **absolute**-mode linear spring (translational pose tracking).
+    pub linear_frequency: f32,
+    /// Damping ratio of the **absolute**-mode linear spring.
+    pub linear_damping_ratio: f32,
+    /// Fraction of gravity the **absolute**-mode linear drive compensates (1.0 = float in place).
+    pub gravity_compensation: f32,
+    /// Hard cap (m/s) on a follow body's linear speed — the anti-launch safety net. A stiff
+    /// pose-following body levering against a contact can otherwise spike skyward; capping the
+    /// per-body solver velocity bounds that to a stumble.
+    pub max_body_speed: f32,
+}
+
+impl Default for PoseFollowing {
+    fn default() -> Self {
+        Self {
+            frequency: 8.0,
+            damping_ratio: 1.0,
+            max_torque: f32::MAX,
+            linear_frequency: 15.0,
+            linear_damping_ratio: 1.0,
+            gravity_compensation: 1.0,
+            max_body_speed: 12.0,
+        }
+    }
 }
 
 #[derive(Reflect, Debug, Clone, Serialize, Deserialize, Default)]

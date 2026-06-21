@@ -1,4 +1,8 @@
-use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, RigidBody, Rotation};
+use avian3d::prelude::{
+    AngularMotor, AngularVelocity, ConstantAngularAcceleration, ConstantLinearAcceleration,
+    Gravity, LinearVelocity, MaxLinearSpeed, MotorModel, Position, RigidBody, Rotation,
+    SphericalJoint,
+};
 use bevy::{
     asset::Assets,
     ecs::{
@@ -7,7 +11,7 @@ use bevy::{
         query::{With, Without},
         system::{Commands, Query, Res},
     },
-    math::{Isometry3d, Vec3},
+    math::{Isometry3d, Quat, Vec3},
     time::Time,
     transform::components::GlobalTransform,
 };
@@ -21,7 +25,7 @@ use crate::{
     },
     ragdoll::{
         bone_mapping::RagdollBoneMap,
-        definition::{BodyMode, Ragdoll},
+        definition::{BodyMode, JointVariant, Ragdoll},
         read_pose_avian::read_pose,
         relative_kinematic_body::{RelativeKinematicBody, RelativeKinematicBodyPositionBased},
         spawning::spawn_ragdoll_avian,
@@ -159,9 +163,11 @@ pub fn update_ragdoll_rigidbodies(
 
                 let body_mode = config.body_mode(body.id).unwrap_or(body.default_mode);
 
-                let target_mode = match body_mode {
-                    BodyMode::Kinematic => RigidBody::Kinematic,
-                    BodyMode::Dynamic => RigidBody::Dynamic,
+                // The pose-following modes simulate as dynamic bodies (driven by forces/motors).
+                let target_mode = if body_mode.is_dynamic() {
+                    RigidBody::Dynamic
+                } else {
+                    RigidBody::Kinematic
                 };
 
                 if *rigid_body != target_mode {
@@ -264,6 +270,239 @@ pub fn read_back_poses_avian(
             );
 
             player.set_default_output_pose(updated_pose);
+        }
+    }
+}
+
+/// Implicit spring-damper acceleration (the acceleration form of avian's
+/// [`MotorModel::SpringDamper`](avian3d::prelude::MotorModel::SpringDamper)): given a position error
+/// and velocity error, returns the angular/linear acceleration that drives both towards zero with the
+/// requested natural `frequency` (Hz) and `damping_ratio`. Unconditionally stable.
+fn spring_damper_accel(
+    position_error: Vec3,
+    velocity_error: Vec3,
+    frequency: f32,
+    damping_ratio: f32,
+    dt: f32,
+) -> Vec3 {
+    use core::f32::consts::TAU;
+    let omega = TAU * frequency;
+    let omega_sq = omega * omega;
+    let two_zeta_omega = 2.0 * damping_ratio * omega;
+    let inv_denominator = 1.0 / (1.0 + two_zeta_omega * dt + omega_sq * dt * dt);
+    // velocity change = (omega_sq*pos + 2*zeta*omega*vel) * dt * inv_denom; acceleration = change / dt.
+    (omega_sq * position_error + two_zeta_omega * velocity_error) * inv_denominator
+}
+
+/// The shortest-arc rotation vector (axis * angle) from `current` to `target`, in world space.
+fn orientation_error(target: Quat, current: Quat) -> Vec3 {
+    let mut error = target * current.conjugate();
+    if error.w < 0.0 {
+        error = -error;
+    }
+    error.to_scaled_axis()
+}
+
+/// Drives [`BodyMode::FollowAbsolute`] bodies towards the animated target pose with a world-space
+/// spring-damper (PD), written into the bodies' [`ConstantAngularAcceleration`] /
+/// [`ConstantLinearAcceleration`]. Non-following dynamic bodies have those inputs zeroed so a body
+/// leaving a follow mode goes limp. The target transform is reconstructed from the body's
+/// [`RelativeKinematicBodyPositionBased`] (set by [`update_ragdolls_avian`]).
+pub fn drive_pose_following_absolute_avian(
+    animation_players: Query<&AnimationGraphPlayer>,
+    ragdoll_assets: Res<Assets<Ragdoll>>,
+    gravity: Res<Gravity>,
+    time: Res<Time>,
+    parent_query: Query<(&Position, &Rotation)>,
+    mut bodies: Query<(
+        &RelativeKinematicBodyPositionBased,
+        &Position,
+        &Rotation,
+        &LinearVelocity,
+        &AngularVelocity,
+        &mut ConstantAngularAcceleration,
+        &mut ConstantLinearAcceleration,
+    )>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+
+    for player in &animation_players {
+        let Some(ragdoll_asset_id) = player.ragdoll.as_ref().map(|h| h.id()) else {
+            continue;
+        };
+        let (Some(ragdoll), Some(spawned_ragdoll)) = (
+            ragdoll_assets.get(ragdoll_asset_id),
+            player.spawned_ragdoll.as_ref(),
+        ) else {
+            continue;
+        };
+
+        let config = player
+            .get_outputs()
+            .get(DEFAULT_OUTPUT_RAGDOLL_CONFIG)
+            .and_then(|v| v.as_ragdoll_config().ok())
+            .cloned()
+            .unwrap_or_default();
+
+        let tuning = ragdoll.pose_following;
+
+        for body in ragdoll.bodies.values() {
+            let Some(&body_entity) = spawned_ragdoll.bodies.get(&body.id) else {
+                continue;
+            };
+            let body_mode = config.body_mode(body.id).unwrap_or(body.default_mode);
+
+            let Ok((rkb, pos, rot, lin_vel, ang_vel, mut ang_acc, mut lin_acc)) =
+                bodies.get_mut(body_entity)
+            else {
+                continue;
+            };
+
+            if body_mode != BodyMode::FollowAbsolute {
+                // Free / kinematic bodies don't use the absolute force inputs; relative-follow bodies
+                // are driven by their joint motor, not these.
+                if body_mode != BodyMode::FollowRelative {
+                    ang_acc.0 = Vec3::ZERO;
+                    lin_acc.0 = Vec3::ZERO;
+                }
+                continue;
+            }
+
+            // World-space target transform: root_world * (target relative to root).
+            let root_iso = rkb
+                .relative_to
+                .and_then(|e| parent_query.get(e).ok())
+                .map(|(p, r)| Isometry3d::new(p.0, r.0))
+                .unwrap_or(Isometry3d::IDENTITY);
+            let target = root_iso * rkb.relative_target;
+
+            // Angular spring towards the target rotation.
+            let pos_error = orientation_error(target.rotation, rot.0);
+            ang_acc.0 = spring_damper_accel(
+                pos_error,
+                -ang_vel.0,
+                tuning.frequency,
+                tuning.damping_ratio,
+                dt,
+            );
+
+            // Linear spring towards the target position, plus gravity compensation.
+            let lin_error = Vec3::from(target.translation) - pos.0;
+            lin_acc.0 = spring_damper_accel(
+                lin_error,
+                -lin_vel.0,
+                tuning.linear_frequency,
+                tuning.linear_damping_ratio,
+                dt,
+            ) - gravity.0 * tuning.gravity_compensation;
+        }
+    }
+}
+
+/// Drives [`BodyMode::FollowRelative`] bodies by enabling and steering the spherical-joint motor of
+/// the joint whose child (`body2`) is the body. The motor's `target_orientation` is the animated
+/// target rotation of the child relative to its parent (both targets share the ragdoll-root frame, so
+/// the root transform cancels). Joints whose child is not in relative-follow mode have their motor
+/// disabled.
+pub fn drive_pose_following_relative_avian(
+    animation_players: Query<&AnimationGraphPlayer>,
+    ragdoll_assets: Res<Assets<Ragdoll>>,
+    body_targets: Query<&RelativeKinematicBodyPositionBased>,
+    mut joints: Query<&mut SphericalJoint>,
+) {
+    for player in &animation_players {
+        let Some(ragdoll_asset_id) = player.ragdoll.as_ref().map(|h| h.id()) else {
+            continue;
+        };
+        let (Some(ragdoll), Some(spawned_ragdoll)) = (
+            ragdoll_assets.get(ragdoll_asset_id),
+            player.spawned_ragdoll.as_ref(),
+        ) else {
+            continue;
+        };
+
+        let config = player
+            .get_outputs()
+            .get(DEFAULT_OUTPUT_RAGDOLL_CONFIG)
+            .and_then(|v| v.as_ragdoll_config().ok())
+            .cloned()
+            .unwrap_or_default();
+
+        let tuning = ragdoll.pose_following;
+
+        for joint in ragdoll.joints.values() {
+            let JointVariant::Spherical(spherical) = &joint.variant else {
+                continue;
+            };
+            let Some(&joint_entity) = spawned_ragdoll.joints.get(&joint.id) else {
+                continue;
+            };
+            let Ok(mut joint_component) = joints.get_mut(joint_entity) else {
+                continue;
+            };
+
+            let child_mode = ragdoll
+                .get_body(spherical.body2)
+                .map(|b| config.body_mode(b.id).unwrap_or(b.default_mode));
+
+            if child_mode != Some(BodyMode::FollowRelative) {
+                joint_component.motor.enabled = false;
+                continue;
+            }
+
+            // Parent- and child-relative targets (both in the ragdoll-root frame).
+            let parent_target = spawned_ragdoll
+                .bodies
+                .get(&spherical.body1)
+                .and_then(|&e| body_targets.get(e).ok())
+                .map(|t| t.relative_target.rotation);
+            let child_target = spawned_ragdoll
+                .bodies
+                .get(&spherical.body2)
+                .and_then(|&e| body_targets.get(e).ok())
+                .map(|t| t.relative_target.rotation);
+
+            let (Some(parent_rot), Some(child_rot)) = (parent_target, child_target) else {
+                joint_component.motor.enabled = false;
+                continue;
+            };
+
+            joint_component.target_orientation = parent_rot.conjugate() * child_rot;
+            joint_component.motor = AngularMotor {
+                enabled: true,
+                max_torque: tuning.max_torque,
+                motor_model: MotorModel::SpringDamper {
+                    frequency: tuning.frequency,
+                    damping_ratio: tuning.damping_ratio,
+                },
+                ..joint_component.motor
+            };
+        }
+    }
+}
+
+/// Anti-launch safety net for pose-following ragdolls. A stiff follow body levering against a contact
+/// can have the constraint solver spike its velocity between the constraint solve and position
+/// integration (avian's own `MaxLinearSpeed` clamp runs at substep *start*, before the spike). This
+/// clamps each ragdoll body's solver velocity to its [`MaxLinearSpeed`] in that gap. Ported from the
+/// guide-dog active-ragdoll controller.
+pub fn clamp_pose_following_body_velocity_avian(
+    mut bodies: Query<
+        (
+            &mut avian3d::dynamics::solver::solver_body::SolverBody,
+            &MaxLinearSpeed,
+        ),
+        With<RelativeKinematicBodyPositionBased>,
+    >,
+) {
+    for (mut solver_body, max_speed) in &mut bodies {
+        let max = max_speed.0;
+        let speed_sq = solver_body.linear_velocity.length_squared();
+        if speed_sq > max * max {
+            solver_body.linear_velocity *= max / speed_sq.sqrt();
         }
     }
 }

@@ -28,6 +28,8 @@ impl<'a> egui::Widget for BodyModeWidget<'a> {
 
                     option(BodyMode::Kinematic);
                     option(BodyMode::Dynamic);
+                    option(BodyMode::FollowAbsolute);
+                    option(BodyMode::FollowRelative);
                 })
                 .response
         })
