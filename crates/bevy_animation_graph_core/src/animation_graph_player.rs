@@ -248,15 +248,6 @@ impl AnimationGraphPlayer {
         self.debug_draw_custom.push(gizmo);
     }
 
-    /// Clears the queued bone/custom gizmo requests without consuming them into
-    /// the deferred buffer. Used by frame-rate producers (e.g. the editor
-    /// preview overlays) that re-submit the full set every frame, to avoid
-    /// accumulating duplicate copies between fixed ticks.
-    pub fn clear_debug_draw_queues(&mut self) {
-        self.debug_draw_bones.clear();
-        self.debug_draw_custom.clear();
-    }
-
     /// Drops the retained deferred gizmo buffer. Called once per fixed tick
     /// before regenerating gizmos, since they are now re-applied every render
     /// frame rather than drained on apply.
@@ -274,7 +265,21 @@ impl AnimationGraphPlayer {
         });
     }
 
-    pub(crate) fn debug_draw_bones(&mut self, system_resources: &SystemResources) {
+    /// Converts the queued bone/custom gizmo requests and draws them, consuming
+    /// the queues.
+    ///
+    /// Unlike graph-evaluation gizmos (which are generated at the fixed timestep
+    /// and persisted via [`DeferredGizmos::apply_persistent`]), these requests
+    /// are submitted every frame by frame-rate producers such as the editor
+    /// preview overlays. They are therefore converted into a throwaway buffer
+    /// and drawn immediately each frame, rather than being routed through the
+    /// fixed-rate [`Self::deferred_gizmos`] buffer — doing so would make them
+    /// flicker (or vanish entirely when more than one fixed tick runs per frame).
+    pub(crate) fn draw_debug_overlay(
+        &mut self,
+        system_resources: &SystemResources,
+        out_gizmos: &mut Gizmos,
+    ) {
         if self.debug_draw_bones.is_empty() && self.debug_draw_custom.is_empty() {
             return;
         }
@@ -284,8 +289,13 @@ impl AnimationGraphPlayer {
 
         let skeleton_handle = self.skeleton.clone();
 
+        let Some(skeleton) = system_resources.skeleton_assets.get(&skeleton_handle) else {
+            return;
+        };
+
+        let mut buffer = DeferredGizmos::default();
         let mut gizmos = DeferredGizmosContext {
-            gizmos: &mut self.deferred_gizmos,
+            gizmos: &mut buffer,
             resources: system_resources,
             entity_map: &self.entity_map,
             space_conversion: SpaceConversionContext {
@@ -297,10 +307,6 @@ impl AnimationGraphPlayer {
             },
         };
 
-        let Some(skeleton) = system_resources.skeleton_assets.get(&skeleton_handle) else {
-            return;
-        };
-
         for (bone_id, color, draw_children) in bones.drain(..) {
             gizmos.bone_gizmo(bone_id, color.into(), draw_children, skeleton, None);
         }
@@ -308,6 +314,8 @@ impl AnimationGraphPlayer {
         for custom_cmd in custom_gizmos.drain(..) {
             gizmos.relative_custom_gizmo(custom_cmd, skeleton, None);
         }
+
+        buffer.apply(out_gizmos);
     }
 
     pub fn pause(&mut self) {

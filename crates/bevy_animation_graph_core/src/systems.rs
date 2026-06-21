@@ -151,24 +151,27 @@ pub fn animation_player(
     animation_players.par_iter_mut().for_each(|(root, player)| {
         run_animation_player(root, player, &time, &sysres);
     });
-    animation_players.par_iter_mut().for_each(|(_, player)| {
-        debug_draw_animation_players(player, &sysres);
-    });
 }
 
-/// System that will draw deferred gizmo commands called during graph evaluation
+/// System that draws the per-player debug gizmos every rendered frame.
+///
+/// Two distinct lifecycles are handled here:
+///
+/// * Graph-evaluation gizmos are generated at the fixed timestep into the
+///   retained [`AnimationGraphPlayer`] buffer, then re-applied (without
+///   draining) every frame so they don't flicker on frames between fixed ticks.
+/// * Bone/custom overlay gizmos are submitted every frame by frame-rate
+///   producers (e.g. the editor preview), so they are converted and drawn
+///   fresh each frame.
 #[allow(clippy::too_many_arguments)]
 pub fn animation_player_deferred_gizmos(
-    animation_players: Query<&AnimationGraphPlayer>,
+    mut animation_players: Query<&mut AnimationGraphPlayer>,
+    sysres: SystemResources,
     mut gizmos: Gizmos,
 ) {
-    for player in &animation_players {
-        // Re-apply without draining: this runs every rendered frame, while the
-        // buffer is only regenerated at the fixed timestep. Draining here would
-        // blank the gizmos on frames between fixed ticks, causing flicker when
-        // the render rate exceeds the fixed rate (e.g. an uncapped, focused
-        // editor window).
+    for mut player in &mut animation_players {
         player.deferred_gizmos.apply_persistent(&mut gizmos);
+        player.draw_debug_overlay(&sysres, &mut gizmos);
     }
 }
 
@@ -250,13 +253,6 @@ pub fn apply_animation_to_targets(
             apply_morph_weights(morphs.weights_mut(), weights);
         }
     }
-}
-
-pub fn debug_draw_animation_players(
-    mut player: Mut<AnimationGraphPlayer>,
-    system_resources: &SystemResources,
-) {
-    player.debug_draw_bones(system_resources);
 }
 
 /// Update `weights` based on weights in `keyframe` with a linear interpolation
